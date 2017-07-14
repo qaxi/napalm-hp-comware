@@ -1,2 +1,2 @@
 """napalm-skeleton package."""
-from hp_comware import HpComwareDriver
+from napalm_hp_comware.hp_comware import HpComwareDriver
