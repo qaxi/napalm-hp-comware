@@ -6,7 +6,11 @@ Read https://napalm.readthedocs.io for more information.
 from netmiko import ConnectHandler, FileTransfer, InLineTransfer
 from netmiko import __version__ as netmiko_version
 
+import sys
+import re
 
+
+from napalm_base.utils import py23_compat
 from napalm_base.base import NetworkDriver
 from napalm_base.exceptions import (
     ConnectionException,
@@ -19,6 +23,11 @@ from napalm_base.exceptions import (
 
 class HpComwareDriver(NetworkDriver):
     """ Napalm driver for HpComware devices.  """
+    _MINUTE_SECONDS = 60
+    _HOUR_SECONDS = 60 * _MINUTE_SECONDS
+    _DAY_SECONDS = 24 * _HOUR_SECONDS
+    _WEEK_SECONDS = 7 * _DAY_SECONDS
+    _YEAR_SECONDS = 365 * _DAY_SECONDS
 
     def __init__(self, hostname, username, password, timeout=60, optional_args=None):
         """ Constructor.
@@ -126,12 +135,6 @@ class HpComwareDriver(NetworkDriver):
         """Close the connection to the device."""
         self.device.disconnect()
 
-    def is_alive(self):
-        """ Returns a flag with the state of the SSH connection """
-        return {
-            'is_alive': self.device.remote_conn.trasport.is_active()
-        }
-
     def get_facts(self):
         """
         Returns a dictionary containing the following information:
@@ -159,114 +162,61 @@ class HpComwareDriver(NetworkDriver):
 
         """
         out_disable_pageing = self.device.send_command('screen-length disable')
-        out_display_version = self.device.send_command("display version").split("\n")
-	out_display_device = self.device.send_command("display device manuinfo").split("\n")
+        if 'configuration is disabled for current user' in out_disable_pageing:
+            pass
+        else:
+            raise ValueError("Disable Pageing cli command error: {}".format(out_disable_pageing))
+            sys.exit(" --- Exiting: try to workaround this ---")
 
+        out_display_version = self.device.send_command("display version").split("\n")
         for line in out_display_version: 
             if "Software, Version " in line:
-                ver_str = line.split("Version")[-1]
-            elif " uptime is " in line: 
+                ver_str = line.split("Version ")[-1]
+            elif " uptime is " in line:
                 uptime_str = line.split("uptime is ")[-1]
+                # print("Uptime String : {}".format(uptime_str))
+                # Exapmples of uptime_str
+                # '57 weeks, 1 day, 7 hours, 53 minutes'
+                # '2 years, 57 weeks, 1 day, 7 hours, 53 minutes'
+                # '53 minutes'
+                uptime = 0
+                match = re.findall(r'(\d+)\s*(\w+){0,5}',uptime_str)
+                for timer in match:
+                    if 'year' in timer[1]:
+                        uptime += int(timer[0]) * self._YEAR_SECONDS
+                    elif 'week' in timer[1]:
+                        uptime += int(timer[0]) * self._WEEK_SECONDS
+                    elif 'day' in timer[1]:
+                        uptime += int(timer[0]) * self._DAY_SECONDS
+                    elif 'hour' in timer[1]:
+                        uptime += int(timer[0]) * self._HOUR_SECONDS
+                    elif 'minute' in timer[1]:
+                        uptime += int(timer[0]) * self._MINUTE_SECONDS
 
-        # display version 
-        # HP Comware Platform Software
-        # Comware Software, Version 5.20.105, Release 1809P10
-        # Copyright (c) 2010-2015 Hewlett-Packard Development Company, L.P.
-        # HP 5800-48G Switch with 1 Interface Slot uptime is 56 weeks, 5 days, 10 hours, 51 minutes
-
-        # HP 5800-48G Switch with 1 Interface Slot with 2 Processors
-        # 1024M   bytes SDRAM
-        # 4M      bytes Nor Flash Memory
-        # 512M    bytes Nand Flash Memory
-        # Config Register points to Nand Flash
-
-        # Hardware Version is Ver.B
-        # CPLD Version is 003
-        # BootRom Version is 301
-        # [SubSlot 0] 48GE+4SFP Plus Hardware Version is Ver.B
-        # [SubSlot 1] No Module
-
-	# display device manuinfo
-	# Slot 1:
-	# DEVICE_NAME          : A5800-48G JC105A
-	# DEVICE_SERIAL_NUMBER : CN1BBFT02S
-	# MAC_ADDRESS          : B8AF-672E-6EA5
-	# MANUFACTURING_DATE   : 2012-01-06
-	# VENDOR_NAME          : HP
-	# 
-	# Power 1:
-	# DEVICE_NAME          : NONE
-	# DEVICE_SERIAL_NUMBER : NONE
-	# MANUFACTURING_DATE   : NONE
-	# VENDOR_NAME          : NONE
-	# 
-	# Fan 1:
-	# DEVICE_NAME          : NONE
-	# DEVICE_SERIAL_NUMBER : NONE
-	# MANUFACTURING_DATE   : NONE
-	# VENDOR_NAME          : NONE
-	# 
-	# Slot 2:
-	# DEVICE_NAME          : A5800-48G JC105A
-	# DEVICE_SERIAL_NUMBER : CN1BBFT01X
-	# MAC_ADDRESS          : B8AF-672E-62C0
-	# MANUFACTURING_DATE   : 2012-01-10
-	# VENDOR_NAME          : HP
-	# 
-	# Power 1:
-	# DEVICE_NAME          : NONE
-	# DEVICE_SERIAL_NUMBER : NONE
-	# MANUFACTURING_DATE   : NONE
-	# VENDOR_NAME          : NONE
-	# 
-	# Fan 1:
-	# DEVICE_NAME          : NONE
-	# DEVICE_SERIAL_NUMBER : NONE
-	# MANUFACTURING_DATE   : NONE
-	# VENDOR_NAME          : NONE
-	# 
-
-        uptime = int(float(output_uptime))
-
-        output = self.device.send_command("show version").split("\n")
-        ver_str = [line for line in output if "Version" in line][0]
-        version = self.parse_version(ver_str)
-
-        sn_str = [line for line in output if "S/N" in line][0]
-        snumber = self.parse_snumber(sn_str)
-
-        hwmodel_str = [line for line in output if "HW model" in line][0]
-        hwmodel = self.parse_hwmodel(hwmodel_str)
-
-        output = self.device.send_command("show configuration")
-        config = vyattaconfparser.parse_conf(output)
-
-        if "host-name" in config["system"]:
-            hostname = config["system"]["host-name"]
-        else:
-            hostname = None
-
-        if "domain-name" in config["system"]:
-            fqdn = config["system"]["domain-name"]
-        else:
-            fqdn = ""
-
-        iface_list = list()
-        for iface_type in config["interfaces"]:
-            for iface_name in config["interfaces"][iface_type]:
-                iface_list.append(iface_name)
-
+        out_display_device = self.device.send_command("display device manuinfo")
+        match = re.findall(r"""^Slot\s+(\d+):\nDEVICE_NAME\s+:\s+(.*)\nDEVICE_SERIAL_NUMBER\s+:\s+(.*)\nMAC_ADDRESS\s+:\s+([0-9A-F]{1,4}-[0-9A-F]{1,4}-[0-9A-F]{1,4})\nMANUFACTURING_DATE\s+:\s+(.*)\nVENDOR_NAME\s+:\s+(.*)""",out_display_device,re.M)
+        snumber = set()
+        vendor = set()
+        hwmodel = set()
+        for idx in match:
+            slot,dev,sn,mac,date,ven = idx
+            snumber.add(sn)
+            vendor.add(ven)
+            hwmodel.add(dev)
+        
+        out_display_current_config = self.device.send_command("display current-configuration")
+        hostname = ''.join(re.findall(r'.*\s+sysname\s+(.*)\n',out_display_current_config,re.M))
+        interfaces = re.findall(r'\ninterface\s+(.*)\n',out_display_current_config,re.M)
         facts = {
-          "uptime": int(uptime),
-          "vendor": py23_compat.text_type("VyOS"),
-          "os_version": py23_compat.text_type(version),
-          "serial_number": py23_compat.text_type(snumber),
-          "model": py23_compat.text_type(hwmodel),
+          "uptime": uptime,
+          "vendor": py23_compat.text_type(','.join(vendor)),
+          "os_version": py23_compat.text_type(ver_str),
+          "serial_number": py23_compat.text_type(','.join(snumber)),
+          "model": py23_compat.text_type(','.join(hwmodel)),
           "hostname": py23_compat.text_type(hostname),
-          "fqdn": py23_compat.text_type(fqdn),
-          "interface_list": iface_list
+          "fqdn": py23_compat.text_type(hostname),
+          "interface_list": interfaces
         }
-
         return facts
 
 
