@@ -275,7 +275,7 @@ class HpComwareDriver(NetworkDriver):
         # Disable Pageing of the device
         self.disable_pageing()
 
-        # <FRGREACHPES002>display mac-address
+        # <device>display mac-address
         # MAC ADDR       VLAN ID  STATE          PORT INDEX               AGING TIME(s)
         # 2c41-3888-24a7 1        Learned        Bridge-Aggregation30     AGING
         # a036-9f00-1dfa 1        Learned        Bridge-Aggregation30     AGING
