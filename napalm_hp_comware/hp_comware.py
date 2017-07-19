@@ -450,8 +450,6 @@ class HpComwareDriver(NetworkDriver):
         for rec in ipv4table:
             interface,ip,mask = rec
             norm_int = self.normalize_port_name(interface)
-            from IPython.core import debugger ;debug = debugger.Pdb().set_trace; debug()
-            # iface['ipv4'] = norm_int[ip['prefix_length'] = mask ]
             iinterfaces = { norm_int : {'ipv4': {ip: { 'prefix_len': mask}}}}
             output_ipv4table.append(iinterfaces)
 
