@@ -365,12 +365,12 @@ class HpComwareDriver(NetworkDriver):
         elif re.match('^Bridge-Aggregation\d*',res_port):
             agg_port_name = res_port
             return agg_port_name
-        elif re.match('^XGE\d*',res_port):
+        elif re.match('^XGE\d.*',res_port):
             # format port XGE1/2/0/7 --> Ten-GigabitEthernet 1/2/0/7
             port_name = res_port.replace('XGE','Ten-GigabitEthernet ')
             # print(" --- Port Name: "+'\x1b[1;32;40m' +"{}" .format(port_name)+'\x1b[0m')
             return port_name
-        elif re.match('^GE\d*',res_port):
+        elif re.match('^GE\d.*',res_port):
             # format port GE1/5/0/19 --> GigabitEthernet 1/5/0/19
             port_name = res_port.replace('GE','GigabitEthernet ')
             # print(" --- Port Name: "+'\x1b[1;32;40m' +"{}" .format(port_name)+'\x1b[0m')
@@ -450,14 +450,65 @@ class HpComwareDriver(NetworkDriver):
         for rec in ipv4table:
             interface,ip,mask = rec
             norm_int = self.normalize_port_name(interface)
-            from IPython.core import debugger ;debug = debugger.Pdb().set_trace; debug()
-            # iface['ipv4'] = norm_int[ip['prefix_length'] = mask ]
             iinterfaces = { norm_int : {'ipv4': {ip: { 'prefix_len': mask}}}}
             output_ipv4table.append(iinterfaces)
 
         return output_ipv4table     
 
 
+    def get_lldp_neighbors(self):
+        """
+        Returns a dictionary where the keys are local ports and the value is a list of \
+        dictionaries with the following information:
+            * hostname
+            * port
 
+        Example::
+
+            {
+            u'Ethernet2':
+                [
+                    {
+                    'hostname': u'junos-unittest',
+                    'port': u'520',
+                    }
+                ],
+            u'Ethernet3':
+                [
+                    {
+                    'hostname': u'junos-unittest',
+                    'port': u'522',
+                    }
+                ],
+            u'Ethernet1':
+                [
+                    {
+                    'hostname': u'junos-unittest',
+                    'port': u'519',
+                    },
+                    {
+                    'hostname': u'ios-xrv-unittest',
+                    'port': u'Gi0/0/0/0',
+                    }
+                ],
+            u'Management1':
+                [
+                    {
+                    'hostname': u'junos-unittest',
+                    'port': u'508',
+                    }
+                ]
+            }
+        """
+        # Disable Pageing of the device
+        self.disable_pageing()
+       
+        out_lldp = self.device.send_command('display lldp neighbor-information')
+        lldptable = re.findall(r'^LLDP.*port\s+\d+\[(.*)\]:\s+.*\s+Update\s+time\s+:\s+(.*)\s+\s+.*\s+.*\s+.*\s+Port\s+ID\s+:\s+(.*)\s+Port\s+description\s:.*\s+System\s+name\s+:\s(.*)\n',out_lldp,re.M)
+        output_lldptable = {} 
+        for rec in lldptable:
+            local_port,update_time,remote_port,neighbor = rec
+            output_lldptable[local_port] = [{'hostname': neighbor, 'port': remote_port}]
+        return output_lldptable     
 
 
