@@ -256,8 +256,6 @@ class HpComwareDriver(NetworkDriver):
                     'mac'       : '00:1C:58:29:4A:C1',
                     'interface' : 'xe-1/0/1',
                     'vlan'       : 100,
-                    'static'    : False,
-                    'active'    : True,
                     'moves'     : 2,
                     'last_move' : 1453191948.11
                 },
@@ -511,4 +509,45 @@ class HpComwareDriver(NetworkDriver):
             output_lldptable[local_port] = [{'hostname': neighbor, 'port': remote_port}]
         return output_lldptable     
 
+    def cli(self, commands):
+        """
+        Will execute a list of commands and return the output in a dictionary format.
+
+        Example::
+
+            {
+                u'display clock':  u''' '11:20:16 CET Mon 03/25/2019
+                                        Time Zone : CET add 01:00:00'
+                                     ''',
+                u'display version'     :   u'''.....'''
+            }
+        """
+        cli_output = dict()
+        if type(commands) is not list:
+            raise TypeError('Please enter a valid list of commands!')
+        
+        for command in commands:
+            output = self._send_command(command)
+            if 'Invalid input:' in output:
+                raise ValueError(
+                    'Unable to execute command "{}"'.format(command))
+            cli_output.setdefault(command, {})
+            cli_output[command] = output
+        return cli_output
+
+    def _send_command(self, command):
+        """ Wrapper for self.device.send.command().
+        If command is a list will iterate through commands until valid command.
+        """
+        try:
+            if isinstance(command, list):
+                for cmd in command:
+                    output = self.device.send_command(cmd)
+                    if "% Unrecognized" not in output:
+                        break
+            else:
+                output = self.device.send_command(command)
+            return output
+        except (socket.error, EOFError) as e:
+            raise ConnectionClosedException(str(e))
 
