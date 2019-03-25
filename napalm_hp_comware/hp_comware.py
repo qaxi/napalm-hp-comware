@@ -10,9 +10,9 @@ import sys
 import re
 
 
-from napalm_base.utils import py23_compat
-from napalm_base.base import NetworkDriver
-from napalm_base.exceptions import (
+from napalm.base.utils import py23_compat
+from napalm.base.base import NetworkDriver
+from napalm.base.exceptions import (
     ConnectionException,
     SessionLockedException,
     MergeConfigException,
