@@ -8,7 +8,7 @@ from netmiko import __version__ as netmiko_version
 
 import sys
 import re
-
+import logging
 
 from napalm.base.utils import py23_compat
 from napalm.base.base import NetworkDriver
@@ -19,7 +19,20 @@ from napalm.base.exceptions import (
     ReplaceConfigException,
     CommandErrorException,
     )
+from napalm.base.helpers import (
+    textfsm_extractor,
+)
+logger = logging.getLogger(__name__)
 
+
+class HpComwarePriviledgeError(Exception):
+    pass
+
+class HpMacFormatError(Exception):
+    pass
+
+class HpNoMacFound(Exception):
+    pass
 
 class HpComwareDriver(NetworkDriver):
     """ Napalm driver for HpComware devices.  """
@@ -145,6 +158,64 @@ class HpComwareDriver(NetworkDriver):
             raise ValueError("Disable Pageing cli command error: {}".format(out_disable_pageing))
             sys.exit(" --- Exiting: try to workaround this ---")
 
+    def priviledge_escalation(self, os_version=''):
+        """ Depends on Comware version 
+       
+        Permission Levels on Comware v5:  0-VISIT, 1-MONITOR, 2-SYSTEM, 3-MANAGE
+        Check userlevel mode with command 'display users'
+
+        <HP-Comware-v5>display users
+        The user application information of the user interface(s):
+          Idx UI      Delay    Type Userlevel
+        + 29  VTY 0   00:00:00 SSH  1                   <----- THIS LEVEL SHOULD BE '3' in
+                                                               order to be accessible 
+                                                               most of the commands
+        
+        Following are more details.
+        VTY 0   :
+                User name: usernameX
+                Location: 1xx.xx.xx.53
+         +    : Current operation user.
+         F    : Current operation user work in async mode.
+
+        
+        """
+        os_version = os_version
+        # check user level mode
+        raw_out = self._send_command('display users')
+        disp_usr_entries = textfsm_extractor(self, "display_users", raw_out)
+        user_level = disp_usr_entries[0]['user_level']
+
+        if user_level == '3': 
+            msg = f' Already in user level: {user_level} ' 
+            logger.info(msg); print(msg)
+            return 0
+        elif user_level in ['1', '2']: 
+            # Escalate user level in order to have all commands available
+            if os_version:
+                os_version = os_version
+            else:
+                os_version = self.get_version()['os_version']
+            if os_version.startswith('5.'):
+                cmd = 'super'
+                l1_password = self.device.password
+                l2_password = self.device.secret
+                self.device.send_command_expect(cmd, expect_string='assword:')
+                self.device.send_command_timing(l2_password, strip_command=True)
+                raw_out = self._send_command('display users')
+                # Check and confirm user level mode
+                disp_usr_entries = textfsm_extractor(self, "display_users", raw_out)
+                user_level = disp_usr_entries[0]['user_level']
+                if user_level == '3': 
+                    msg = f' --- Changed to user level: {user_level} ---' 
+                    logger.info(msg); print(msg)
+                    return 0
+                else:
+                    raise HpComwarePriviledgeError
+            elif os_version.startswith('7.'):
+                # super levles on Comware v5 0-VISIT, 1-MONITOR, 2-SYSTEM, 3-MANAGE
+                cmd = 'system-view'
+        
 
     def get_facts(self):
         """
@@ -158,47 +229,29 @@ class HpComwareDriver(NetworkDriver):
          * serial_number - Serial number of the device
          * interface_list - List of the interfaces of the device
 
-        Example::
-
+        self.get_version() returns
             {
-            'uptime': 151005.57332897186,
-            'vendor': u'Arista',
-            'os_version': u'4.14.3-2329074.gaatlantarel',
+             'os_version': '5.20.105',
+             'os_version_release': '1808P21',
+             'vendor': 'HP',
+             'model': 'A5800-24G-SFP',
+             'uptime': 14888460
+             }
+        self.get_interfaces() 
+            'interface_list': [u'Ethernet2', u'Management1', u'Ethernet1', u'Ethernet3']
+        from 'display device manuinfo'
             'serial_number': u'SN0123A34AS',
-            'model': u'vEOS',
             'hostname': u'eos-router',
             'fqdn': u'eos-router',
-            'interface_list': [u'Ethernet2', u'Management1', u'Ethernet1', u'Ethernet3']
-            }
-
         """
         self.disable_pageing()
-        out_display_version = self.device.send_command("display version").split("\n")
-        for line in out_display_version: 
-            if "Software, Version " in line:
-                ver_str = line.split("Version ")[-1]
-            elif " uptime is " in line:
-                uptime_str = line.split("uptime is ")[-1]
-                # print("Uptime String : {}".format(uptime_str))
-                # Exapmples of uptime_str
-                # '57 weeks, 1 day, 7 hours, 53 minutes'
-                # '2 years, 57 weeks, 1 day, 7 hours, 53 minutes'
-                # '53 minutes'
-                uptime = 0
-                match = re.findall(r'(\d+)\s*(\w+){0,5}',uptime_str)
-                for timer in match:
-                    if 'year' in timer[1]:
-                        uptime += int(timer[0]) * self._YEAR_SECONDS
-                    elif 'week' in timer[1]:
-                        uptime += int(timer[0]) * self._WEEK_SECONDS
-                    elif 'day' in timer[1]:
-                        uptime += int(timer[0]) * self._DAY_SECONDS
-                    elif 'hour' in timer[1]:
-                        uptime += int(timer[0]) * self._HOUR_SECONDS
-                    elif 'minute' in timer[1]:
-                        uptime += int(timer[0]) * self._MINUTE_SECONDS
+        facts = self.get_version()
+        facts['vendor'] = u'Hewlett-Packard'
+        facts['interface_list'] = list(self.get_interfaces().keys())
+        self.priviledge_escalation(os_version=facts['os_version'])
 
-        out_display_device = self.device.send_command("display device manuinfo")
+        # get hardware and serial number
+        out_display_device = self._send_command("display device manuinfo")
         match = re.findall(r"""^Slot\s+(\d+):\nDEVICE_NAME\s+:\s+(.*)\nDEVICE_SERIAL_NUMBER\s+:\s+(.*)\nMAC_ADDRESS\s+:\s+([0-9a-fA-F]{1,4}-[0-9a-fA-F]{1,4}-[0-9a-fA-F]{1,4})\nMANUFACTURING_DATE\s+:\s+(.*)\nVENDOR_NAME\s+:\s+(.*)""",out_display_device,re.M)
         snumber = set()
         vendor = set()
@@ -208,23 +261,96 @@ class HpComwareDriver(NetworkDriver):
             snumber.add(sn)
             vendor.add(ven)
             hwmodel.add(dev)
-        
         out_display_current_config = self.device.send_command("display current-configuration")
         hostname = ''.join(re.findall(r'.*\s+sysname\s+(.*)\n',out_display_current_config,re.M))
-        interfaces = re.findall(r'\ninterface\s+(.*)\n',out_display_current_config,re.M)
-        facts = {
-          "uptime": uptime,
-          "vendor": py23_compat.text_type(','.join(vendor)),
-          "os_version": py23_compat.text_type(ver_str),
-          "serial_number": py23_compat.text_type(','.join(snumber)),
-          "model": py23_compat.text_type(','.join(hwmodel)),
-          "hostname": py23_compat.text_type(hostname),
-          "fqdn": py23_compat.text_type(hostname),
-          "interface_list": interfaces
-        }
+        facts["hostname"] = py23_compat.text_type(hostname),
+        facts["serial_number"] = py23_compat.text_type(','.join(snumber)),
+        facts["model"] = py23_compat.text_type(','.join(hwmodel)),
+        facts["fqdn"] = py23_compat.text_type(hostname),
         return facts
 
-    def get_mac_address_table(self):
+
+    def get_interfaces(self):
+        """
+        Returns a dictionary of dictionaries. The keys for the first dictionary will be the \
+        interfaces in the devices. The inner dictionary will containing the following data for \
+        each interface:
+
+         * is_up (True/False)
+         * is_enabled (True/False)
+         * description (string)
+         * last_flapped (float in seconds)
+         * speed (int in Mbit)
+         * mac_address (string)
+
+        ifaces_entries_br output is list of dictionaries like:
+             # The brief information of interface(s) under route mode:
+             # Link: ADM - administratively down; Stby - standby
+             # Protocol: (s) - spoofing
+             #
+             # The brief information of interface(s) under bridge mode:
+             # Link: ADM - administratively down; Stby - standby
+             # Speed or Duplex: (a)/A - auto; H - half; F - full
+             # Type: A - access; T - trunk; H - hybrid
+             # Interface            Link Speed   Duplex Type PVID Description
+             #
+
+	    {
+             'interface': 'BAGG5',
+             'interface_state': 'UP',           # (UP|DOWN|ADM|Stby)
+             'interface_protocol_state': '',    # (UP|DOWN|UP\(s\)|DOWN\(s\))
+             'ip_address': '',
+             'description': 'la-la-la-sw01',
+             'speed': '20G(a)',                 # (\d+|--|\d+G\(a\)|A|auto)
+             'duplex': 'F(a)',                  # (A|F|F\(a\))
+             'interface_mode': 'T',             # (A|T|H)\
+             'pvid': '1'
+             },
+        """
+        raw_out_brief = self._send_command('display interface brief')
+        ifaces_entries_br = textfsm_extractor(self, "display_interface_brief", raw_out_brief)
+        ifaces = dict()
+        for row in ifaces_entries_br:
+            for k,v in row.items():
+                if k == 'interface':
+                    key = self.normalize_port_name(v)
+                    is_up = False
+                    is_enabled = False
+                    speed = str()
+                    mac_address = str() 
+                    description = str()
+                    if row['interface_state'].lower() == 'up':
+                        is_up = is_enabled = True
+                    else:
+                        is_up = is_enabled = False
+                    if row['speed'] == '' or row['speed'] in ['auto', 'A']:
+                        speed = ''
+                    else:
+                        m = re.findall(r'(\d+)([G|T|M])', row['speed'])
+                        if m[0][1].upper() == 'M':
+                            Xbytes = 1
+                        elif m[0][1].upper() == 'G':
+                            Xbytes = 1000
+                        elif m[0][1].upper() == 'T':
+                            Xbytes = 100000
+                        speed = int(m[0][0]) * Xbytes
+                    description = row['description']
+                    ifaces[key] = { 
+                            'is_up': is_up,
+                            'is_enabled': is_enabled,
+                            'last_flapped': -1.0,
+                            'speed': speed,
+                            'mac_address': mac_address,
+                            'description': description,
+                            'textFSM_display_interface_brief': row
+                            }
+        # TODO: fill mac_address  ... from 'display interface'
+        # raw_out = self._send_command('display interface')
+        # ifaces_entries = textfsm_extractor(self, "display_interface", raw_out)
+        return ifaces
+
+
+    def get_mac_address_table(self, raw_mac_table=None):
 
         """
         Returns a lists of dictionaries. Each dictionary represents an entry in the MAC Address
@@ -270,17 +396,22 @@ class HpComwareDriver(NetworkDriver):
                 }
             ]
         """
-        # Disable Pageing of the device
-        self.disable_pageing()
-
-        # <device>display mac-address
-        # MAC ADDR       VLAN ID  STATE          PORT INDEX               AGING TIME(s)
-        # 2c41-3888-24a7 1        Learned        Bridge-Aggregation30     AGING
-        # a036-9f00-1dfa 1        Learned        Bridge-Aggregation30     AGING
-        # a036-9f00-29c5 1        Learned        Bridge-Aggregation31     AGING
-        # a036-9f00-29c6 1        Learned        Bridge-Aggregation31     AGING
-        # b8af-675c-0800 1        Learned        Bridge-Aggregation2      AGING
-        out_mac_table = self.device.send_command('display mac-address')
+        if 'No mac address found' in raw_mac_table:
+            return ['No mac address found']
+        elif raw_mac_table is not None:
+            out_mac_table = raw_mac_table
+        else:
+            # Disable Pageing of the device
+            self.disable_pageing()
+            
+            # <device>display mac-address
+            # MAC ADDR       VLAN ID  STATE          PORT INDEX               AGING TIME(s)
+            # 2c41-3888-24a7 1        Learned        Bridge-Aggregation30     AGING
+            # a036-9f00-1dfa 1        Learned        Bridge-Aggregation30     AGING
+            # a036-9f00-29c5 1        Learned        Bridge-Aggregation31     AGING
+            # a036-9f00-29c6 1        Learned        Bridge-Aggregation31     AGING
+            # b8af-675c-0800 1        Learned        Bridge-Aggregation2      AGING
+            out_mac_table = self.device.send_command('display mac-address')
         mactable = re.findall(r'^([0-9a-fA-F]{1,4}-[0-9a-fA-F]{1,4}-[0-9a-fA-F]{1,4})\s+(\d+)\s+(\w+)\s+([A-Za-z0-9-/]{1,40})\s+(.*)',out_mac_table,re.M)
         output_mactable = []
         record = {}
@@ -382,9 +513,7 @@ class HpComwareDriver(NetworkDriver):
             return res_port 
             # print('\x1b[1;31;40m' + " --- Unknown Port Name: {} --- ".format(res_port)+'\x1b[0m')
 
-
     def get_interfaces_ip(self):
-
         """
         Returns all configured IP addresses on all interfaces as a dictionary of dictionaries.
         Keys of the main dictionary represent the name of the interface.
@@ -500,7 +629,6 @@ class HpComwareDriver(NetworkDriver):
         """
         # Disable Pageing of the device
         self.disable_pageing()
-       
         out_lldp = self.device.send_command('display lldp neighbor-information')
         lldptable = re.findall(r'^LLDP.*port\s+\d+\[(.*)\]:\s+.*\s+Update\s+time\s+:\s+(.*)\s+\s+.*\s+.*\s+.*\s+Port\s+ID\s+:\s+(.*)\s+Port\s+description\s:.*\s+System\s+name\s+:\s(.*)\n',out_lldp,re.M)
         output_lldptable = {} 
@@ -535,6 +663,7 @@ class HpComwareDriver(NetworkDriver):
             cli_output[command] = output
         return cli_output
 
+
     def _send_command(self, command):
         """ Wrapper for self.device.send.command().
         If command is a list will iterate through commands until valid command.
@@ -550,4 +679,144 @@ class HpComwareDriver(NetworkDriver):
             return output
         except (socket.error, EOFError) as e:
             raise ConnectionClosedException(str(e))
+
+
+    def hp_mac_format(self, mac):
+        """ return hp mac format """
+        if ':' in mac:
+            # 04:4b:ed:31:75:cd -> 044bed3175cd
+            temp_mac = "".join(mac.split(':'))
+        elif '-' in mac:
+            # 04-4b-ed-31-75-cd -> 044bed3175cd
+            # 044b-ed31-75cd -> 044bed3175cd
+            temp_mac = "".join(mac.split('-'))
+        else:
+            # match '044bed3175cd'
+            m = re.match(r'.*([a-f,A-F,0-9]{12})', mac)
+            if m:
+                temp_mac = mac
+            else:
+                raise HpMacFormatError(f'Unrecognised Mac format: {mac}')
+        out_mac = ''
+        for idx, value in enumerate(temp_mac):
+            if idx in [4,8]:
+                out_mac += '-'
+            out_mac += value
+        return str(out_mac)
+
+
+    def get_active_physical_ports(self, aggregation_port):
+        """ Return textFSM table with physical ports joined as "aggregation_port" """
+        raw_out = self._send_command(
+                'display link-aggregation verbose ' + str(aggregation_port))
+        port_entries = textfsm_extractor(
+            self, "display_link_aggregation_verbose", raw_out)
+        active_ports = list()
+        for row in port_entries:
+            # Return only active ports
+            if row['status'].lower() == 's':
+                active_ports.append(self.normalize_port_name(row['port_name']))
+        return active_ports
+
+
+    def trace_mac_address(self, mac_address):
+        """ Search for mac_address, get switch port and return lldp/cdp
+        neighbour of that port """
+        try:
+            mac_address = self.hp_mac_format(mac_address)
+            raw_out = self._send_command('display mac-address ' + mac_address)
+            if 'No mac address found' in raw_out:
+                raise HpNoMacFound
+            mac_table = self.get_mac_address_table(raw_mac_table=raw_out)
+            msg = f' --- Found mac address --- \n {mac_table}'
+            print(msg)
+            logger.info(msg)
+            for row in mac_table:
+                for k,pname in row.items():
+                    if k == 'interface' and pname != None:
+                        # send lldp neighbour command
+                        if ('BAGG' in pname) or ('Bridge-Aggregation' in pname):
+                            # Check and format the interface name
+                            agg_port_name = self.normalize_port_name(pname)
+                            # get first physical port of the aggregated port
+                            physical_port = self.get_active_physical_ports(agg_port_name)[0]
+                            neighbours = self.get_lldp_neighbors_detail(interface=physical_port)
+                            msg = f' --- Neighbour System Name: {neighbours[0]["remote_system_name"].lower()}'
+                            print(msg)
+                            logger.info(msg)
+                            return neighbours[0]['remote_system_name'].lower()
+                        elif ('XGE' in pname) or ('GE' in pname):
+                            pname = self.normalize_port_name(pname)
+                            from IPython import embed; embed()
+                            from IPython.core import debugger; debug = debugger.Pdb().set_trace; debug()
+                            neighbours = self.get_lldp_neighbors_detail(interface=pname)
+                            raise NotImplementedError
+                        else:
+                            return 'Last Port'
+        except HpMacFormatError as e:
+            msg = f'Unrecognised Mac format: {mac_address}'
+            logger.error(msg)
+            print(msg)
+        except HpNoMacFound as e:
+            msg = f' --- No mac address {mac_address} found: {e} ---'
+            print(msg)
+            logger.info(msg)
+            return 'No mac address found'
+        except Exception as e:
+            raise e
+
+
+    def get_version(self):
+        """ Return Comware version, vendor, model and uptime. 
+        Use it as part of get_facts
+        {
+         'os_version': '5.20.105',
+         'os_version_release': '1808P21',
+         'vendor': 'HP',
+         'model': 'A5800-24G-SFP',
+         'uptime': 14888460
+         }
+        """
+        raw_out = self._send_command('display version')
+        # get only first row of text FSM table
+        version_entries = textfsm_extractor(self, "display_version", raw_out)[0]
+        # convert uptime from '24 weeks, 4 days, 7 hours, 41 minutes to seconds
+        uptime_str = version_entries['uptime']
+        uptime = 0
+        match = re.findall(r'(\d+)\s*(\w+){0,5}',uptime_str)
+        for timer in match:
+            if 'year' in timer[1]:
+                uptime += int(timer[0]) * self._YEAR_SECONDS
+            elif 'week' in timer[1]:
+                uptime += int(timer[0]) * self._WEEK_SECONDS
+            elif 'day' in timer[1]:
+                uptime += int(timer[0]) * self._DAY_SECONDS
+            elif 'hour' in timer[1]:
+                uptime += int(timer[0]) * self._HOUR_SECONDS
+            elif 'minute' in timer[1]:
+                uptime += int(timer[0]) * self._MINUTE_SECONDS
+        version_entries['uptime'] = uptime
+        return version_entries
+
+
+    def get_lldp_neighbors_detail(self, interface=""):
+        # lldp cli commands depends on comware version
+        version_dict = self.get_version()
+
+        if interface:
+            if version_dict['os_version'].startswith('5.'):
+                command = 'display lldp neighbor-information interface ' + str(interface)
+            elif version_dict['os_version'].startswith('7.'):
+                command = 'display lldp neighbor-information interface ' + str(interface)+' verbose'
+        else:
+            # display all lldp neigh interfaces command
+            command = "display lldp neighbor-information "
+
+        raw_out = self._send_command(command)
+        lldp_entries = textfsm_extractor(
+                self, "display_lldp_neighbor_information_interface", raw_out )
+
+        if len(lldp_entries) == 0:
+            return {}
+        return lldp_entries
 
