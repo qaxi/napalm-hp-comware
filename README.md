@@ -35,7 +35,7 @@ Table of implemented methods:
     * ping                          ❌
     * traceroute                    ❌
                                     
- Additional Methods:
+Additional Methods:
     * _generate_ssh_proxy_file      ✅
     * priviledge_escalation         ✅
     * format_mac_cisco_way          ✅
