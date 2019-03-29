@@ -36,6 +36,7 @@ Table of implemented methods:
     * traceroute                    ❌
                                     
 Additional Methods:
+
     * _generate_ssh_proxy_file      ✅
     * priviledge_escalation         ✅
     * format_mac_cisco_way          ✅
@@ -44,6 +45,7 @@ Additional Methods:
     * get_active_physical_ports     ✅
     * trace_mac_address             ✅
     * get_version                   ✅
+
 
 Installation
 ============
