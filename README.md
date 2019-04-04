@@ -45,6 +45,7 @@ Additional Methods:
     * get_active_physical_ports     ✅
     * trace_mac_address             ✅
     * get_version                   ✅
+    * get_current_priviledge()      ✅
 
 
 Installation

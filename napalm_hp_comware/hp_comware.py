@@ -9,6 +9,7 @@ from netmiko import __version__ as netmiko_version
 import sys
 import re
 import logging
+from json import dumps
 
 from napalm.base.utils import py23_compat
 from napalm.base.base import NetworkDriver
@@ -25,7 +26,7 @@ from napalm.base.helpers import (
 logger = logging.getLogger(__name__)
 
 
-class HpComwarePriviledgeError(Exception):
+class HpComwarePrivilegeError(Exception):
     pass
 
 class HpMacFormatError(Exception):
@@ -90,7 +91,7 @@ class HpComwareDriver(NetworkDriver):
             'secret': '',
             'verbose': False,
             'keepalive': 30,
-            'global_delay_factor': 1,
+            'global_delay_factor': 2,
             'use_keys': False,
             'key_file': None,
             'ssh_strict': False,
@@ -158,7 +159,15 @@ class HpComwareDriver(NetworkDriver):
             raise ValueError("Disable Pageing cli command error: {}".format(out_disable_pageing))
             sys.exit(" --- Exiting: try to workaround this ---")
 
-    def priviledge_escalation(self, os_version=''):
+    def get_current_privilege(self):
+        """ Get and set as property current privilege of the user """
+        raw_out = self._send_command('display users', delay_factor=2)
+        disp_usr_entries = textfsm_extractor(self, "display_users", raw_out)
+        self.current_user_level = disp_usr_entries[0]['user_level']
+        return self.current_user_level
+
+
+    def privilege_escalation(self, os_version=''):
         """ Depends on Comware version 
        
         Permission Levels on Comware v5:  0-VISIT, 1-MONITOR, 2-SYSTEM, 3-MANAGE
@@ -182,15 +191,13 @@ class HpComwareDriver(NetworkDriver):
         """
         os_version = os_version
         # check user level mode
-        raw_out = self._send_command('display users')
-        disp_usr_entries = textfsm_extractor(self, "display_users", raw_out)
-        user_level = disp_usr_entries[0]['user_level']
+        self.get_current_privilege()
 
-        if user_level == '3': 
-            msg = f' Already in user level: {user_level} ' 
+        if self.current_user_level == '3': 
+            msg = f' Already in user level: {self.current_user_level} ' 
             logger.info(msg); print(msg)
             return 0
-        elif user_level in ['1', '2']: 
+        elif self.current_user_level in ['1', '2']: 
             # Escalate user level in order to have all commands available
             if os_version:
                 os_version = os_version
@@ -202,16 +209,13 @@ class HpComwareDriver(NetworkDriver):
                 l2_password = self.device.secret
                 self.device.send_command_expect(cmd, expect_string='assword:')
                 self.device.send_command_timing(l2_password, strip_command=True)
-                raw_out = self._send_command('display users')
                 # Check and confirm user level mode
-                disp_usr_entries = textfsm_extractor(self, "display_users", raw_out)
-                user_level = disp_usr_entries[0]['user_level']
-                if user_level == '3': 
-                    msg = f' --- Changed to user level: {user_level} ---' 
+                if self.get_current_privilege() == '3': 
+                    msg = f' --- Changed to user level: {self.current_user_level} ---' 
                     logger.info(msg); print(msg)
                     return 0
                 else:
-                    raise HpComwarePriviledgeError
+                    raise HpComwarePrivilegeError
             elif os_version.startswith('7.'):
                 # super levles on Comware v5 0-VISIT, 1-MONITOR, 2-SYSTEM, 3-MANAGE
                 cmd = 'system-view'
@@ -248,7 +252,7 @@ class HpComwareDriver(NetworkDriver):
         facts = self.get_version()
         facts['vendor'] = u'Hewlett-Packard'
         facts['interface_list'] = list(self.get_interfaces().keys())
-        self.priviledge_escalation(os_version=facts['os_version'])
+        self.privilege_escalation(os_version=facts['os_version'])
 
         # get hardware and serial number
         out_display_device = self._send_command("display device manuinfo")
@@ -716,21 +720,33 @@ class HpComwareDriver(NetworkDriver):
             # Return only active ports
             if row['status'].lower() == 's':
                 active_ports.append(self.normalize_port_name(row['port_name']))
+        print(f' --- Active ports of the aggregation_port {aggregation_port} ---')
+        print(dumps(active_ports, sort_keys=True, indent=4, separators=(',', ': ')))
         return active_ports
 
 
     def trace_mac_address(self, mac_address):
         """ Search for mac_address, get switch port and return lldp/cdp
         neighbour of that port """
+        result = { 
+                'found': False,
+                'cdp_answer': False,
+                'lldp_answer': False,
+                'local_port': '',
+                'remote_port': '',
+                'next_device': '',
+                }
         try:
             mac_address = self.hp_mac_format(mac_address)
             raw_out = self._send_command('display mac-address ' + mac_address)
             if 'No mac address found' in raw_out:
                 raise HpNoMacFound
+            else:
+                result['found'] = True
+            msg = f' --- Found mac address --- \n'
             mac_table = self.get_mac_address_table(raw_mac_table=raw_out)
-            msg = f' --- Found mac address --- \n {mac_table}'
-            print(msg)
-            logger.info(msg)
+            print(msg); logger.info(msg)
+            print(dumps(mac_table, sort_keys=True, indent=4, separators=(',', ': ')))
             for row in mac_table:
                 for k,pname in row.items():
                     if k == 'interface' and pname != None:
@@ -739,29 +755,53 @@ class HpComwareDriver(NetworkDriver):
                             # Check and format the interface name
                             agg_port_name = self.normalize_port_name(pname)
                             # get first physical port of the aggregated port
+                            result['local_port'] = agg_port_name
                             physical_port = self.get_active_physical_ports(agg_port_name)[0]
-                            neighbours = self.get_lldp_neighbors_detail(interface=physical_port)
-                            msg = f' --- Neighbour System Name: {neighbours[0]["remote_system_name"].lower()}'
-                            print(msg)
-                            logger.info(msg)
-                            return neighbours[0]['remote_system_name'].lower()
+                            lldp_neighbours = self.get_lldp_neighbors_detail(interface=physical_port)
+                            cdp_neighbours = self.get_cdp_neighbors_detail(interface=physical_port)
+                            if lldp_neighbours:
+                                result['lldp_answer'] = True
+                                result['remote_port'] = lldp_neighbours[0]["remote_port"]
+                                result['next_device'] = lldp_neighbours[0]["remote_system_name"]
+                                msg = f' --- LLDP Neighbour System Name: {result["next_device"]}'
+                            elif cdp_neighbours:
+                                result['cdp_answer'] = True
+                                result['remote_port'] = cdp_neighbours[0]["remote_port"]
+                                result['next_device'] = cdp_neighbours[0]["remote_system_name"]
+                                msg = f' --- CDP Neighbour System Name: {result["next_device"]}'
+                            print(msg); logger.info(msg)
+                            return result
                         elif ('XGE' in pname) or ('GE' in pname):
                             pname = self.normalize_port_name(pname)
+                            result['local_port'] = pname
                             from IPython import embed; embed()
                             from IPython.core import debugger; debug = debugger.Pdb().set_trace; debug()
-                            neighbours = self.get_lldp_neighbors_detail(interface=pname)
-                            raise NotImplementedError
+                            lldp_neighbours = self.get_lldp_neighbors_detail(interface=pname)
+                            cdp_neighbours = self.get_cdp_neighbors_detail(interface=pname)
+                            if lldp_neighbours:
+                                result['lldp_answer'] = True
+                                result['remote_port'] = lldp_neighbours[0]["remote_port"]
+                                result['next_device'] = lldp_neighbours[0]["remote_system_name"]
+                                msg = f' --- LLDP Neighbour System Name: {result["next_device"]}'
+                            elif cdp_neighbours:
+                                result['cdp_answer'] = True
+                                result['remote_port'] = cdp_neighbours[0]["remote_port"]
+                                result['next_device'] = cdp_neighbours[0]["remote_system_name"]
+                                msg = f' --- CDP Neighbour System Name: {result["next_device"]}'
+                            print(msg); logger.info(msg)
+                            return result
                         else:
-                            return 'Last Port'
+                            raise NotImplementedError
         except HpMacFormatError as e:
             msg = f'Unrecognised Mac format: {mac_address}'
             logger.error(msg)
             print(msg)
+            return result
         except HpNoMacFound as e:
             msg = f' --- No mac address {mac_address} found: {e} ---'
             print(msg)
             logger.info(msg)
-            return 'No mac address found'
+            return result
         except Exception as e:
             raise e
 
@@ -800,7 +840,21 @@ class HpComwareDriver(NetworkDriver):
 
 
     def get_lldp_neighbors_detail(self, interface=""):
-        # lldp cli commands depends on comware version
+        """ lldp cli commands depends on comware version
+        return diction format 
+        { [
+            'local_interface'    :'',
+            'local_interface_idx'    :'',
+            'remote_chassis_id'    :'',
+            'remote_port'    :'',
+            'remote_port_description'    :'',
+            'remote_system_name'    :'',
+            'remote_system_description'    :'',
+            'remote_system_capab'    :'',
+            'remote_system_enable_capab'    :'',
+            ]
+        }
+        """
         version_dict = self.get_version()
 
         if interface:
@@ -811,12 +865,30 @@ class HpComwareDriver(NetworkDriver):
         else:
             # display all lldp neigh interfaces command
             command = "display lldp neighbor-information "
-
         raw_out = self._send_command(command)
         lldp_entries = textfsm_extractor(
                 self, "display_lldp_neighbor_information_interface", raw_out )
-
         if len(lldp_entries) == 0:
             return {}
         return lldp_entries
+
+
+    def get_cdp_neighbors_detail(self, interface=""):
+        """ cdp cli commands depends on comware version
+        return diction format 
+        { [
+            'local_interface'    :'',
+            'local_interface_idx'    :'',
+            'remote_chassis_id'    :'',
+            'remote_port'    :'',
+            'remote_port_description'    :'',
+            'remote_system_name'    :'',
+            'remote_system_description'    :'',
+            'remote_system_capab'    :'',
+            'remote_system_enable_capab'    :'',
+            ]
+        }
+        """
+        # TODO  not implemented 
+        return False
 
