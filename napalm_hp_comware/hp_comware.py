@@ -35,6 +35,10 @@ class HpMacFormatError(Exception):
 class HpNoMacFound(Exception):
     pass
 
+class HpNoActiePortsInAggregation(Exception):
+    pass
+
+
 class HpComwareDriver(NetworkDriver):
     """ Napalm driver for HpComware devices.  """
     _MINUTE_SECONDS = 60
@@ -91,7 +95,7 @@ class HpComwareDriver(NetworkDriver):
             'secret': '',
             'verbose': False,
             'keepalive': 30,
-            'global_delay_factor': 2,
+            'global_delay_factor': 3,
             'use_keys': False,
             'key_file': None,
             'ssh_strict': False,
@@ -152,7 +156,7 @@ class HpComwareDriver(NetworkDriver):
 
     def disable_pageing(self):
         """ Disable pageing on the device """
-        out_disable_pageing = self.device.send_command('screen-length disable')
+        out_disable_pageing = self._send_command('screen-length disable')
         if 'configuration is disabled for current user' in out_disable_pageing:
             pass
         else:
@@ -265,7 +269,7 @@ class HpComwareDriver(NetworkDriver):
             snumber.add(sn)
             vendor.add(ven)
             hwmodel.add(dev)
-        out_display_current_config = self.device.send_command("display current-configuration")
+        out_display_current_config = self._send_command("display current-configuration")
         hostname = ''.join(re.findall(r'.*\s+sysname\s+(.*)\n',out_display_current_config,re.M))
         facts["hostname"] = py23_compat.text_type(hostname),
         facts["serial_number"] = py23_compat.text_type(','.join(snumber)),
@@ -400,38 +404,21 @@ class HpComwareDriver(NetworkDriver):
                 }
             ]
         """
-        if 'No mac address found' in raw_mac_table:
-            return ['No mac address found']
-        elif raw_mac_table is not None:
+        if raw_mac_table is not None:
+            if 'No mac address found' in raw_mac_table:
+                return ['No mac address found']
             out_mac_table = raw_mac_table
         else:
             # Disable Pageing of the device
             self.disable_pageing()
-            
-            # <device>display mac-address
-            # MAC ADDR       VLAN ID  STATE          PORT INDEX               AGING TIME(s)
-            # 2c41-3888-24a7 1        Learned        Bridge-Aggregation30     AGING
-            # a036-9f00-1dfa 1        Learned        Bridge-Aggregation30     AGING
-            # a036-9f00-29c5 1        Learned        Bridge-Aggregation31     AGING
-            # a036-9f00-29c6 1        Learned        Bridge-Aggregation31     AGING
-            # b8af-675c-0800 1        Learned        Bridge-Aggregation2      AGING
-            out_mac_table = self.device.send_command('display mac-address')
-        mactable = re.findall(r'^([0-9a-fA-F]{1,4}-[0-9a-fA-F]{1,4}-[0-9a-fA-F]{1,4})\s+(\d+)\s+(\w+)\s+([A-Za-z0-9-/]{1,40})\s+(.*)',out_mac_table,re.M)
-        output_mactable = []
-        record = {}
-        for rec in mactable:
-            mac,vlan,state,port,aging = rec
-            record['mac'] = self.format_mac_cisco_way(mac)
-            record['interface'] = self.normalize_port_name(port)
-            record['vlan'] = vlan
-            record['static'] = 'None'
-            record['active'] = 'None'
-            record['moves'] = 'None'
-            record['last_move'] = 'None'
-            output_mactable.append(record)
-        return output_mactable     
-
-
+        raw_out = self._send_command('display mac-address')
+        mac_table_entries = textfsm_extractor(self, "display_mac_address_all", raw_out)
+        # owerwrite some values in order to be compliant 
+        for row in mac_table_entries:                                            
+            row['mac'] = self.format_mac_cisco_way(row['mac'])                   
+            row['interface'] = self.normalize_port_name(row['interface'])        
+        return mac_table_entries
+    
     def format_mac_cisco_way(self,macAddress):
         """ 
         function formating mac address to cisco form 
@@ -474,7 +461,7 @@ class HpComwareDriver(NetworkDriver):
         """
         # Disable Pageing of the device
         self.disable_pageing()
-        out_arp_table = self.device.send_command('display arp')
+        out_arp_table = self._send_command('display arp')
         arptable = re.findall(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9a-fA-F]{1,4}-[0-9a-fA-F]{1,4}-[0-9a-fA-F]{1,4})\s+(\d+)\s+([A-Za-z0-9-/]{1,40})\s+(\d+)\s+(\w+)\n',out_arp_table,re.M)
         output_arptable = []
         record = {}
@@ -570,7 +557,7 @@ class HpComwareDriver(NetworkDriver):
         # Disable Pageing of the device
         self.disable_pageing()
        
-        out_curr_config = self.device.send_command('display current-configuration')
+        out_curr_config = self._send_command('display current-configuration')
         ipv4table = re.findall(r'^interface\s+([A-Za-z0-9-/]{1,40})\n.*\s+ip\s+address\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\n',out_curr_config,re.M)
         # TODO: get device with v6 and update above struct
         # ipv6table = re.findall(r'',out_curr_config,re.M)
@@ -633,7 +620,7 @@ class HpComwareDriver(NetworkDriver):
         """
         # Disable Pageing of the device
         self.disable_pageing()
-        out_lldp = self.device.send_command('display lldp neighbor-information')
+        out_lldp = self._send_command('display lldp neighbor-information')
         lldptable = re.findall(r'^LLDP.*port\s+\d+\[(.*)\]:\s+.*\s+Update\s+time\s+:\s+(.*)\s+\s+.*\s+.*\s+.*\s+Port\s+ID\s+:\s+(.*)\s+Port\s+description\s:.*\s+System\s+name\s+:\s(.*)\n',out_lldp,re.M)
         output_lldptable = {} 
         for rec in lldptable:
@@ -675,11 +662,13 @@ class HpComwareDriver(NetworkDriver):
         try:
             if isinstance(command, list):
                 for cmd in command:
-                    output = self.device.send_command(cmd)
+                    output = self.device.send_command_timing(command)
+                    # output = self.device.send_command(cmd)
                     if "% Unrecognized" not in output:
                         break
             else:
-                output = self.device.send_command(command)
+                # output = self.device.send_command(command)
+                output = self.device.send_command_timing(command)
             return output
         except (socket.error, EOFError) as e:
             raise ConnectionClosedException(str(e))
@@ -711,18 +700,20 @@ class HpComwareDriver(NetworkDriver):
 
     def get_active_physical_ports(self, aggregation_port):
         """ Return textFSM table with physical ports joined as "aggregation_port" """
-        raw_out = self._send_command(
-                'display link-aggregation verbose ' + str(aggregation_port))
-        port_entries = textfsm_extractor(
-            self, "display_link_aggregation_verbose", raw_out)
-        active_ports = list()
+        raw_out = self._send_command('display link-aggregation verbose ' + str(aggregation_port))
+        port_entries = textfsm_extractor(self, "display_link_aggregation_verbose", raw_out)
+        a_ports = list()
         for row in port_entries:
             # Return only active ports
             if row['status'].lower() == 's':
-                active_ports.append(self.normalize_port_name(row['port_name']))
-        print(f' --- Active ports of the aggregation_port {aggregation_port} ---')
-        print(dumps(active_ports, sort_keys=True, indent=4, separators=(',', ': ')))
-        return active_ports
+                a_ports.append(self.normalize_port_name(row['port_name']))
+        
+        if a_ports:
+            print(f' --- Active ports of the aggregation_port {aggregation_port} ---')
+            print(dumps(a_ports, sort_keys=True, indent=4, separators=(',', ': ')))
+            return a_ports
+        else:
+            raise HpNoActiePortsInAggregation
 
 
     def trace_mac_address(self, mac_address):
@@ -743,8 +734,8 @@ class HpComwareDriver(NetworkDriver):
                 raise HpNoMacFound
             else:
                 result['found'] = True
-            msg = f' --- Found mac address --- \n'
-            mac_table = self.get_mac_address_table(raw_mac_table=raw_out)
+            msg = f' --- Found {mac_address} mac address --- \n'
+            mac_table = textfsm_extractor(self, "display_mac_address", raw_out)
             print(msg); logger.info(msg)
             print(dumps(mac_table, sort_keys=True, indent=4, separators=(',', ': ')))
             for row in mac_table:
