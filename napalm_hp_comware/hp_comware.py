@@ -726,6 +726,7 @@ class HpComwareDriver(NetworkDriver):
                 'local_port': '',
                 'remote_port': '',
                 'next_device': '',
+                'next_device_descr': '',
                 }
         try:
             mac_address = self.hp_mac_format(mac_address)
@@ -754,11 +755,13 @@ class HpComwareDriver(NetworkDriver):
                                 result['lldp_answer'] = True
                                 result['remote_port'] = lldp_neighbours[0]["remote_port"]
                                 result['next_device'] = lldp_neighbours[0]["remote_system_name"]
+                                result['next_device_descr'] = lldp_neighbours[0]['remote_system_description']
                                 msg = f' --- LLDP Neighbour System Name: {result["next_device"]}'
                             elif cdp_neighbours:
                                 result['cdp_answer'] = True
                                 result['remote_port'] = cdp_neighbours[0]["remote_port"]
                                 result['next_device'] = cdp_neighbours[0]["remote_system_name"]
+                                result['next_device_descr'] = cdp_neighbours[0]['remote_system_description']
                                 msg = f' --- CDP Neighbour System Name: {result["next_device"]}'
                             print(msg); logger.info(msg)
                             return result
